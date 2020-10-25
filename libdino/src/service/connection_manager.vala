@@ -146,16 +146,19 @@ public class ConnectionManager : Object {
         }
     }
 
-    private void connect_(Account account, string? resource = null) {
+    private async void connect_(Account account, string? resource = null) {
         if (connections.has_key(account)) connections[account].stream.detach_modules();
         connection_errors.unset(account);
         if (resource == null) resource = account.resourcepart;
 
-        XmppStream stream = new XmppStream();
-        foreach (XmppStreamModule module in module_manager.get_modules(account, resource)) {
-            stream.add_module(module);
+        XmppStreamResult stream_result = yield Xmpp.establish_stream(account.bare_jid, module_manager.get_modules(account, resource), log_options);
+        if (stream_result.stream == null) {
+            if (stream_result.tls_errors != null) {
+                set_connection_error(account, new ConnectionError(ConnectionError.Source.TLS, null) { reconnect_recomendation=ConnectionError.Reconnect.NEVER});
+            }
         }
-        stream.log = new XmppLog(account.bare_jid.to_string(), log_options);
+        XmppStream stream = stream_result.stream;
+
         debug("[%s] New connection with resource %s: %p", account.bare_jid.to_string(), resource, stream);
 
         Connection connection = new Connection(stream, new DateTime.now_utc());
@@ -167,9 +170,6 @@ public class ConnectionManager : Object {
         stream.get_module(Sasl.Module.IDENTITY).received_auth_failure.connect((stream, node) => {
             set_connection_error(account, new ConnectionError(ConnectionError.Source.SASL, null));
         });
-        stream.get_module(Tls.Module.IDENTITY).invalid_certificate.connect(() => {
-            set_connection_error(account, new ConnectionError(ConnectionError.Source.TLS, null) { reconnect_recomendation=ConnectionError.Reconnect.NEVER});
-        });
         stream.received_node.connect(() => {
             connection.last_activity = new DateTime.now_utc();
         });
@@ -179,7 +179,7 @@ public class ConnectionManager : Object {
 
     private async void connect_async(Account account, XmppStream stream) {
         try {
-            yield stream.connect(account.domainpart);
+            yield stream.loop();
         } catch (Error e) {
             debug("[%s %p] Error: %s", account.bare_jid.to_string(), stream, e.message);
             change_connection_state(account, ConnectionState.DISCONNECTED);
